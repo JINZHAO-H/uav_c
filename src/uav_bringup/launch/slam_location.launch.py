@@ -29,6 +29,7 @@ def generate_launch_description():
     start_livox = LaunchConfiguration("start_livox")
     start_point_lio = LaunchConfiguration("start_point_lio")
     start_location_bridge = LaunchConfiguration("start_location_bridge")
+    start_flight_bridge = LaunchConfiguration("start_flight_bridge")  #用于控制是否启动 flight_bridge
 
     dds_device = LaunchConfiguration("dds_device")
     dds_baudrate = LaunchConfiguration("dds_baudrate")
@@ -42,6 +43,7 @@ def generate_launch_description():
         DeclareLaunchArgument("start_livox", default_value="true"),
         DeclareLaunchArgument("start_point_lio", default_value="true"),
         DeclareLaunchArgument("start_location_bridge", default_value="true"),
+        DeclareLaunchArgument("start_flight_bridge", default_value="true"),
         DeclareLaunchArgument(
             "dds_device",
             default_value="/dev/serial/by-path/platform-3610000.usb-usb-0:2.3:1.0-port0",
@@ -120,11 +122,33 @@ def generate_launch_description():
         ],
     )
 
+    flight_bridge = Node(
+        package="uav_control_cpp",
+        executable="flight_bridge",
+        name="flight_bridge",
+        output="screen",
+        condition=IfCondition(start_flight_bridge),
+        parameters=[
+            {"setpoint_rate": 40.0},
+            {"prime_seconds": 2.0},
+            {"preserve_current_yaw": True},
+            {"respect_external_takeover": True},
+            {"request_offboard_mode": False},  #不主动请求 OFFBOARD
+            {"enable_offboard_publish": False},  #不主动发布 offboard_control_mode
+            {"enable_setpoint_publish": False},  #不主动发布 trajectory_setpoint
+            {"target_system": 1},
+            {"target_component": 1},
+            {"source_system": 1},
+            {"source_component": 1},
+        ],
+    )
+
     return LaunchDescription(
         declared_args + [
             dds_agent,
             livox_driver,
             point_lio,
             location_bridge,
+            flight_bridge,
         ]
     )
