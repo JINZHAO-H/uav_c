@@ -5,6 +5,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "px4_msgs/msg/offboard_control_mode.hpp"  //告诉 PX4 当前用什么控制方式
 #include "px4_msgs/msg/trajectory_setpoint.hpp"  //给 PX4 发位置/速度/航向目标
@@ -196,7 +197,7 @@ private:
     return static_cast<double>(local_position_.heading);
   }
 
-  void vehicle_status_cb(const px4_msgs::msg::VehicleStatus::SharedPtr msg
+  void vehicle_status_cb(const px4_msgs::msg::VehicleStatus::SharedPtr msg)
   {  //PX4 状态回调函数，更新 state_ 结构体
     std::lock_guard<std::mutex> lock(mutex_);
     state_.connected = true;
