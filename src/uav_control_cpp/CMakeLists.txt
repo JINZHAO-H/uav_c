@@ -14,6 +14,19 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 
+add_executable(location_bridge src/location_bridge.cpp)
+
+ament_target_dependencies(location_bridge
+  rclcpp
+  px4_msgs
+  nav_msgs
+)
+
+install(TARGETS
+  location_bridge
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
