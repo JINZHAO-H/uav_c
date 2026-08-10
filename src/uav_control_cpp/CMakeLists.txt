@@ -15,6 +15,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 
 add_executable(location_bridge src/location_bridge.cpp)
+add_executable(flight_bridge src/flight_bridge.cpp)
 
 ament_target_dependencies(location_bridge
   rclcpp
@@ -22,8 +23,14 @@ ament_target_dependencies(location_bridge
   nav_msgs
 )
 
+ament_target_dependencies(flight_bridge
+  rclcpp
+  px4_msgs
+)
+
 install(TARGETS
   location_bridge
+  flight_bridge
   DESTINATION lib/${PROJECT_NAME}
 )
 
