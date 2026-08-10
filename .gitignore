@@ -9,3 +9,9 @@ log/
 *.pcd
 *.pyc
 __pycache__/
+
+# Third-party repositories imported by ros2.repos.
+src/livox_ros_driver2/
+src/point_lio_ros2/
+src/px4_msgs/
+src/px4_ros_com/
