@@ -1,0 +1,20 @@
+repositories:
+  px4_msgs:
+    type: git
+    url: https://github.com/PX4/px4_msgs.git
+    version: release/1.15
+
+  px4_ros_com:
+    type: git
+    url: https://github.com/PX4/px4_ros_com.git
+    version: release/1.15
+
+  livox_ros_driver2:
+    type: git
+    url: https://github.com/Livox-SDK/livox_ros_driver2.git
+    version: master
+
+  point_lio_ros2:
+    type: git
+    url: https://github.com/dfloreaa/point_lio_ros2.git
+    version: main

@@ -1,0 +1,45 @@
+mission:
+  route: custom_points
+  require_pose_for_takeoff: true
+  abort_hold_seconds: 5.0
+
+flight:
+  setpoint_rate: 40.0
+  default_point_speed: 0.3
+  prime_seconds: 2.0
+  offboard_arm_timeout: 25.0
+  request_offboard_mode: false
+  preserve_current_yaw: true
+  respect_external_takeover: true
+  tolerance_xy: 0.1
+  tolerance_z: 0.1
+  pose_timeout: 1.0
+  pose_wait_timeout: 30.0
+  check_start_xy_before_arm: true
+  max_start_xy_before_arm: 2.0
+  check_start_z_before_arm: true
+  max_start_z_before_arm: 1.0
+  check_estimator_for_takeoff: true
+  estimator_status_timeout: 5.0
+
+origin:
+  origin_x: 0.0
+  origin_y: 0.0
+  origin_z: 0.0
+  zero_initial_xy: true
+  zero_initial_z: true
+
+dds:
+  point_lio_odom_topic: /aft_mapped_to_init
+  visual_odometry_topic: /fmu/in/vehicle_visual_odometry
+  position_variance: 0.03
+  orientation_variance: 0.05
+  velocity_variance: 0.05
+  odometry_timeout: 0.5
+
+routes:
+  custom_points:
+    points:
+      - name: takeoff
+        xyz: [0.0, 0.0, 0.8]
+        hold: 1.0
