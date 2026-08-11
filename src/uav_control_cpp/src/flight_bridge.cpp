@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -34,6 +35,11 @@ std::array<float, 3> enu_to_ned(const std::array<float, 3> & xyz)
     -xyz[2],
   }};
 }  // ENU -> NED
+
+bool finite3(const std::array<float, 3> & xyz)
+{
+  return std::isfinite(xyz[0]) && std::isfinite(xyz[1]) && std::isfinite(xyz[2]);
+}
 
 double normalize_yaw(double yaw)
 {
@@ -110,9 +116,9 @@ public:  //读参数，建发布器，建订阅器，建定时器
   {
     std::lock_guard<std::mutex> lock(mutex_);
     return {{
-      local_position_.x,
       local_position_.y,
-      local_position_.z,
+      local_position_.x,
+      -local_position_.z,
     }};
   }
 
@@ -126,6 +132,104 @@ public:  //读参数，建发布器，建订阅器，建定时器
       std::this_thread::sleep_for(50ms);
     }
     return current_state().connected;
+  }
+
+  bool has_recent_pose(double timeout_sec) const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (local_position_received_at_.nanoseconds() == 0) {
+      return false;
+    }
+    const double age = (now() - local_position_received_at_).seconds();
+    return age <= timeout_sec && local_position_.xy_valid && local_position_.z_valid;
+  }
+
+  std::pair<bool, std::string> local_pose_sanity(
+    bool check_xy = true,
+    double max_xy = 2.0,
+    bool check_z = true,
+    double max_z = 1.0,
+    double max_age_sec = 1.0) const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (local_position_received_at_.nanoseconds() == 0) {
+      return {false, "no /fmu/out/vehicle_local_position received"};
+    }
+
+    const double age = (now() - local_position_received_at_).seconds();
+    if (age > max_age_sec) {
+      std::ostringstream stream;
+      stream << "/fmu/out/vehicle_local_position is stale (" << age << "s old)";
+      return {false, stream.str()};
+    }
+    if (!local_position_.xy_valid) {
+      return {false, "/fmu/out/vehicle_local_position xy_valid is false"};
+    }
+    if (!local_position_.z_valid) {
+      return {false, "/fmu/out/vehicle_local_position z_valid is false"};
+    }
+
+    const std::array<float, 3> pose_enu{{
+      local_position_.y,
+      local_position_.x,
+      -local_position_.z,
+    }};
+    if (!finite3(pose_enu)) {
+      return {false, "local pose contains non-finite values"};
+    }
+    if (check_xy && std::max(std::fabs(pose_enu[0]), std::fabs(pose_enu[1])) > max_xy) {
+      std::ostringstream stream;
+      stream << "local pose x/y=(" << pose_enu[0] << ", " << pose_enu[1]
+             << ") exceeds max_xy=" << max_xy;
+      return {false, stream.str()};
+    }
+    if (check_z && std::fabs(pose_enu[2]) > max_z) {
+      std::ostringstream stream;
+      stream << "local pose z=" << pose_enu[2] << " exceeds max_z=" << max_z;
+      return {false, stream.str()};
+    }
+
+    std::ostringstream stream;
+    stream << "local pose sane: (" << pose_enu[0] << ", " << pose_enu[1] << ", "
+           << pose_enu[2] << "), age=" << age << "s";
+    return {true, stream.str()};
+  }
+
+  std::pair<bool, std::string> wait_for_sane_pose(
+    double timeout_sec,
+    bool check_xy = true,
+    double max_xy = 2.0,
+    bool check_z = true,
+    double max_z = 1.0,
+    double max_age_sec = 1.0)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(std::max(timeout_sec, 0.0));
+    std::string last_detail = "no /fmu/out/vehicle_local_position received";
+    auto last_log_at = std::chrono::steady_clock::time_point{};
+
+    while (rclcpp::ok()) {
+      const auto [ready, detail] = local_pose_sanity(
+        check_xy, max_xy, check_z, max_z, max_age_sec);
+      if (ready) {
+        return {true, detail};
+      }
+      last_detail = detail;
+
+      const auto now_steady = std::chrono::steady_clock::now();
+      if (now_steady >= deadline) {
+        return {false, last_detail};
+      }
+      if (last_log_at.time_since_epoch().count() == 0 ||
+        now_steady - last_log_at >= 2s)
+      {
+        last_log_at = now_steady;
+        RCLCPP_WARN(get_logger(), "Waiting for sane PX4 local pose: %s", detail.c_str());
+      }
+      std::this_thread::sleep_for(50ms);
+    }
+
+    return {false, last_detail};
   }
 
   void set_target(const std::array<float, 3> & target_enu)  //飞点的入口之一
@@ -212,6 +316,7 @@ private:
   {  //PX4 本地位置回调函数，更新 local_position_ 结构体
     std::lock_guard<std::mutex> lock(mutex_);
     local_position_ = *msg;
+    local_position_received_at_ = now();
   }
 
   std::string nav_state_name(uint8_t nav_state) const
@@ -344,6 +449,7 @@ private:
   mutable std::mutex mutex_;
   BridgeState state_{};
   px4_msgs::msg::VehicleLocalPosition local_position_{};
+  rclcpp::Time local_position_received_at_{0, 0, RCL_ROS_TIME};
   std::array<float, 3> target_enu_{};
   double target_yaw_{0.0};
   bool has_target_{false};
