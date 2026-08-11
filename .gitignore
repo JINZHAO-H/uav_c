@@ -9,6 +9,7 @@ log/
 *.pcd
 *.pyc
 __pycache__/
+.local_notes/
 
 # Third-party repositories imported by ros2.repos.
 src/livox_ros_driver2/

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -36,6 +37,21 @@ std::array<float, 3> enu_to_ned(const std::array<float, 3> & xyz)
   }};
 }  // ENU -> NED
 
+double distance_xy(const std::array<float, 3> & a, const std::array<float, 3> & b)
+{  //计算两点的水平距离
+  const double dx = static_cast<double>(a[0] - b[0]);
+  const double dy = static_cast<double>(a[1] - b[1]);
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+double distance_3d(const std::array<float, 3> & a, const std::array<float, 3> & b)
+{  //计算两点的三维距离
+  const double dx = static_cast<double>(a[0] - b[0]);
+  const double dy = static_cast<double>(a[1] - b[1]);
+  const double dz = static_cast<double>(a[2] - b[2]);
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 bool finite3(const std::array<float, 3> & xyz)
 {
   return std::isfinite(xyz[0]) && std::isfinite(xyz[1]) && std::isfinite(xyz[2]);
@@ -72,6 +88,10 @@ public:  //读参数，建发布器，建订阅器，建定时器
   {
     rate_hz_ = std::max(declare_parameter<double>("setpoint_rate", 40.0), 1.0);
     prime_seconds_ = std::max(declare_parameter<double>("prime_seconds", 2.0), 0.0);  //进入 OFFBOARD 前提前发 setpoint 的时间
+    tolerance_xy_ = std::max(declare_parameter<double>("tolerance_xy", 0.1), 0.01);  //飞点的水平容忍度，单位 m
+    tolerance_z_ = std::max(declare_parameter<double>("tolerance_z", 0.1), 0.01);  //飞点的垂直容忍度，单位 m
+    min_timeout_ = std::max(declare_parameter<double>("min_timeout", 15.0), 1.0);  //飞点的最小超时时间，单位 s
+    timeout_per_meter_ = std::max(declare_parameter<double>("timeout_per_meter", 10.0), 1.0);  //飞点的每米超时时间，单位 s/m
     preserve_current_yaw_ = declare_parameter<bool>("preserve_current_yaw", true);  //进入 OFFBOARD 后保持当前航向
     respect_external_takeover_ = declare_parameter<bool>("respect_external_takeover", true);  //是否尊重飞手/地面站接管
     request_offboard_mode_ = declare_parameter<bool>("request_offboard_mode", false);  //是否在启动时请求 OFFBOARD 模式
@@ -232,10 +252,22 @@ public:  //读参数，建发布器，建订阅器，建定时器
     return {false, last_detail};
   }
 
-  void set_target(const std::array<float, 3> & target_enu)  //飞点的入口之一
+  bool target_reached(
+    const std::array<float, 3> & current_enu,
+    const std::array<float, 3> & target_enu) const
+  {  //判断当前 PX4 本地位置是否到达目标点
+    const double xy_error = distance_xy(current_enu, target_enu);
+    const double z_error = std::fabs(static_cast<double>(current_enu[2] - target_enu[2]));
+    return xy_error <= tolerance_xy_ && z_error <= tolerance_z_;
+  }
+
+  void set_target(
+    const std::array<float, 3> & target_enu,
+    double speed = 0.0)  //飞点的入口之一
   {
     std::lock_guard<std::mutex> lock(mutex_);  //锁住 mutex_，防止多线程同时访问 target_enu_ 和 has_target_
     target_enu_ = target_enu;
+    target_speed_ = std::max(speed, 0.0);
     has_target_ = true;
     if (preserve_current_yaw_) {
       target_yaw_ = current_heading_locked();
@@ -247,6 +279,99 @@ public:  //读参数，建发布器，建订阅器，建定时器
   {
     std::lock_guard<std::mutex> lock(mutex_);
     active_ = active;
+  }
+
+  void hold(
+    const std::array<float, 3> & target_enu,
+    double seconds,
+    const std::string & name = "hold")
+  {  //在当前位置悬停一段时间，持续把同一个目标点写入 FlightBridge
+    const auto end_time = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(std::max(seconds, 0.0));
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Holding %s at ENU(%.2f, %.2f, %.2f) for %.1fs",
+      name.c_str(),
+      target_enu[0],
+      target_enu[1],
+      target_enu[2],
+      seconds);
+
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < end_time) {
+      set_target(target_enu);
+      std::this_thread::sleep_for(50ms);
+    }
+  }
+
+  bool goto_point(
+    const std::array<float, 3> & target_enu,
+    double speed,
+    double hold_sec = 0.0,
+    const std::string & name = "point")
+  {  //飞到指定点，持续把同一个目标点写入 FlightBridge，直到到达目标点或超时
+    const auto [pose_ready, pose_detail] = wait_for_sane_pose(
+      5.0, false, 0.0, false, 0.0, 1.0);
+    if (!pose_ready) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "Cannot fly to %s before PX4 local pose is ready: %s",
+        name.c_str(),
+        pose_detail.c_str());
+      return false;
+    }
+
+    const auto start_pose = current_pose_tuple();
+    const double distance = distance_3d(start_pose, target_enu);
+    const double effective_speed = std::max(speed, 0.0);
+    const double timeout_sec = effective_speed > 0.0 ?
+      std::max(min_timeout_, distance / effective_speed * 3.0) :
+      std::max(min_timeout_, distance * timeout_per_meter_);
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(timeout_sec);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Flying to %s ENU(%.2f, %.2f, %.2f), distance=%.2fm, speed=%.2fm/s, timeout=%.1fs",
+      name.c_str(),
+      target_enu[0],
+      target_enu[1],
+      target_enu[2],
+      distance,
+      effective_speed,
+      timeout_sec);
+
+    set_target(target_enu, effective_speed);
+
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      const auto current = current_pose_tuple();
+
+      if (target_reached(current, target_enu)) {
+        RCLCPP_INFO(get_logger(), "Reached %s", name.c_str());
+
+        if (hold_sec > 0.0) {
+          hold(target_enu, hold_sec, name);
+        }
+
+        return true;
+      }
+
+      std::this_thread::sleep_for(50ms);
+    }
+
+    const auto current = current_pose_tuple();
+    RCLCPP_ERROR(
+      get_logger(),
+      "Timed out flying to %s. Current ENU(%.2f, %.2f, %.2f), target ENU(%.2f, %.2f, %.2f)",
+      name.c_str(),
+      current[0],
+      current[1],
+      current[2],
+      target_enu[0],
+      target_enu[1],
+      target_enu[2]);
+
+    return false;
   }
 
   void prime_setpoints(const std::array<float, 3> & target_enu)
@@ -383,14 +508,22 @@ private:
   void publish_trajectory_setpoint()
   {  //给 PX4 发位置/速度/航向目标，OFFBOARD 模式下必须每 1 秒至少发一次
     std::array<float, 3> target{};
+    std::array<float, 3> current{};
     double yaw = 0.0;
+    double speed = 0.0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!has_target_) {
         return;
       }
       target = target_enu_;
+      current = {{
+        local_position_.y,
+        local_position_.x,
+        -local_position_.z,
+      }};
       yaw = target_yaw_;
+      speed = target_speed_;
     }
 
     px4_msgs::msg::TrajectorySetpoint msg{};
@@ -401,11 +534,26 @@ private:
       target_ned[1],
       target_ned[2],
     }};
-    msg.velocity = {{
-      std::numeric_limits<float>::quiet_NaN(),
-      std::numeric_limits<float>::quiet_NaN(),
-      std::numeric_limits<float>::quiet_NaN(),
-    }};
+    const double distance = distance_3d(current, target);
+    if (speed > 0.0 && distance > tolerance_xy_) {
+      const std::array<float, 3> velocity_enu{{
+        static_cast<float>((target[0] - current[0]) / distance * speed),
+        static_cast<float>((target[1] - current[1]) / distance * speed),
+        static_cast<float>((target[2] - current[2]) / distance * speed),
+      }};
+      const auto velocity_ned = enu_to_ned(velocity_enu);
+      msg.velocity = {{
+        velocity_ned[0],
+        velocity_ned[1],
+        velocity_ned[2],
+      }};
+    } else {
+      msg.velocity = {{
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN(),
+      }};
+    }
     msg.acceleration = {{
       std::numeric_limits<float>::quiet_NaN(),
       std::numeric_limits<float>::quiet_NaN(),
@@ -452,11 +600,16 @@ private:
   rclcpp::Time local_position_received_at_{0, 0, RCL_ROS_TIME};
   std::array<float, 3> target_enu_{};
   double target_yaw_{0.0};
+  double target_speed_{0.0};
   bool has_target_{false};
   bool active_{false};
 
   double rate_hz_{40.0};
   double prime_seconds_{2.0};
+  double tolerance_xy_{0.1};
+  double tolerance_z_{0.1};
+  double min_timeout_{15.0};
+  double timeout_per_meter_{10.0};
   bool preserve_current_yaw_{true};
   bool respect_external_takeover_{true};
   bool request_offboard_mode_{false};
