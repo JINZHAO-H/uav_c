@@ -13,9 +13,21 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 add_executable(location_bridge src/location_bridge.cpp)
 add_executable(flight_bridge src/flight_bridge.cpp)
+add_executable(mission_runner src/mission_runner.cpp)
+
+target_include_directories(flight_bridge PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+target_include_directories(mission_runner PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 
 ament_target_dependencies(location_bridge
   rclcpp
@@ -28,10 +40,24 @@ ament_target_dependencies(flight_bridge
   px4_msgs
 )
 
+ament_target_dependencies(mission_runner
+  rclcpp
+  px4_msgs
+)
+
+target_link_libraries(mission_runner
+  yaml-cpp
+)
+
 install(TARGETS
   location_bridge
   flight_bridge
+  mission_runner
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 if(BUILD_TESTING)
