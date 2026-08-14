@@ -17,6 +17,10 @@
 #include "px4_msgs/msg/vehicle_local_position.hpp"  //读 PX4 当前本地位置
 #include "px4_msgs/msg/vehicle_status.hpp"  //读 PX4 当前状态
 #include "rclcpp/rclcpp.hpp"  //
+#include "px4_msgs/msg/vehicle_command_ack.hpp"  //知道 ARM / LAND / SET_MODE 命令有没有被 PX4 接受
+#include "px4_msgs/msg/event.hpp"  //读取 PX4 commander / preflight / failsafe 事件
+#include "px4_msgs/msg/estimator_status_flags.hpp"  //判断 PX4 EKF 是否对齐、是否有 external vision、local position 是否可靠
+#include "px4_msgs/msg/vehicle_land_detected.hpp"  //判断 PX4 认为飞机是在地上、空中、降落中
 
 using namespace std::chrono_literals;
 
@@ -120,6 +124,26 @@ public:  //读参数，建发布器，建订阅器，建定时器
       "/fmu/out/vehicle_local_position",
       px4_qos(),
       std::bind(&FlightBridge::vehicle_local_position_cb, this, std::placeholders::_1));
+
+    command_ack_sub_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
+       "/fmu/out/vehicle_command_ack",
+      px4_qos(),  //命令是否被接受
+      std::bind(&FlightBridge::vehicle_command_ack_cb, this, std::placeholders::_1));
+
+    event_sub_ = create_subscription<px4_msgs::msg::Event>(
+      "/fmu/out/event",
+      px4_qos(),  //PX4 报了什么事件
+      std::bind(&FlightBridge::event_cb, this, std::placeholders::_1));
+
+    estimator_flags_sub_ = create_subscription<px4_msgs::msg::EstimatorStatusFlags>(
+      "/fmu/out/estimator_status_flags",
+      px4_qos(),  //EKF 是否健康
+      std::bind(&FlightBridge::estimator_flags_cb, this, std::placeholders::_1));
+
+    land_detected_sub_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
+      "/fmu/out/vehicle_land_detected",
+      px4_qos(),  //PX4 是否认为飞机在地面
+      std::bind(&FlightBridge::land_detected_cb, this, std::placeholders::_1));
 
     publish_timer_ = create_wall_timer(  //按固定频率执行 publish_once()
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / rate_hz_)),
@@ -252,6 +276,68 @@ public:  //读参数，建发布器，建订阅器，建定时器
     }
 
     return {false, last_detail};
+  }
+
+  void log_preflight_diagnostics() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Preflight diagnostics: connected=%d armed=%d mode=%s local_xy_valid=%d local_z_valid=%d",
+      state_.connected,
+      state_.armed,
+      state_.mode.c_str(),
+      local_position_.xy_valid,
+      local_position_.z_valid);
+
+    if (estimator_flags_received_at_.nanoseconds() != 0) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Estimator flags: tilt_align=%d yaw_align=%d ev_pos=%d ev_hgt=%d ev_yaw=%d fake_pos=%d fake_hgt=%d",
+        estimator_flags_.cs_tilt_align,
+        estimator_flags_.cs_yaw_align,
+        estimator_flags_.cs_ev_pos,
+        estimator_flags_.cs_ev_hgt,
+        estimator_flags_.cs_ev_yaw,
+        estimator_flags_.cs_fake_pos,
+        estimator_flags_.cs_fake_hgt);
+    } else {
+      RCLCPP_WARN(get_logger(), "No /fmu/out/estimator_status_flags received yet");
+    }
+
+    if (command_ack_received_at_.nanoseconds() != 0) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Last command ack: command=%u result=%u result_param2=%u",
+        last_command_ack_.command,
+        last_command_ack_.result,
+        last_command_ack_.result_param2);
+    } else {
+      RCLCPP_WARN(get_logger(), "No /fmu/out/vehicle_command_ack received yet");
+    }
+
+    if (event_received_at_.nanoseconds() != 0) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Last PX4 event: id=%u log_levels=%u",
+        last_event_.id,
+        last_event_.log_levels);
+    } else {
+      RCLCPP_WARN(get_logger(), "No /fmu/out/event received yet");
+    }
+
+    if (land_detected_received_at_.nanoseconds() != 0) {
+      RCLCPP_INFO(
+        get_logger(),
+        "Land detected: landed=%d maybe_landed=%d ground_contact=%d freefall=%d",
+        land_detected_.landed,
+        land_detected_.maybe_landed,
+        land_detected_.ground_contact,
+        land_detected_.freefall);
+    } else {
+      RCLCPP_WARN(get_logger(), "No /fmu/out/vehicle_land_detected received yet");
+    }
   }
 
   bool target_reached(
@@ -446,6 +532,34 @@ private:
     local_position_received_at_ = now();
   }
 
+  void vehicle_command_ack_cb(const px4_msgs::msg::VehicleCommandAck::SharedPtr msg)
+  {  //PX4 命令反馈回调函数，更新 last_command_ack_ 结构体
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_command_ack_ = *msg;
+    command_ack_received_at_ = now();
+  }
+
+  void event_cb(const px4_msgs::msg::Event::SharedPtr msg)
+  {  //PX4 事件回调函数，更新 last_event_ 结构体
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_event_ = *msg;
+    event_received_at_ = now();
+  }
+
+  void estimator_flags_cb(const px4_msgs::msg::EstimatorStatusFlags::SharedPtr msg)
+  {  //PX4 EKF 状态回调函数，更新 estimator_flags_ 结构体
+    std::lock_guard<std::mutex> lock(mutex_);
+    estimator_flags_ = *msg;
+    estimator_flags_received_at_ = now();
+  }
+
+  void land_detected_cb(const px4_msgs::msg::VehicleLandDetected::SharedPtr msg)
+  {  //PX4 降落状态回调函数，更新 land_detected_ 结构体
+    std::lock_guard<std::mutex> lock(mutex_);
+    land_detected_ = *msg;
+    land_detected_received_at_ = now();
+  }
+
   std::string nav_state_name(uint8_t nav_state) const
   {  //把 PX4 的 nav_state 转成字符串，方便打印
     switch (nav_state) {
@@ -600,6 +714,19 @@ private:
   BridgeState state_{};
   px4_msgs::msg::VehicleLocalPosition local_position_{};
   rclcpp::Time local_position_received_at_{0, 0, RCL_ROS_TIME};
+
+  px4_msgs::msg::VehicleCommandAck last_command_ack_{};
+  rclcpp::Time command_ack_received_at_{0, 0, RCL_ROS_TIME};
+
+  px4_msgs::msg::Event last_event_{};
+  rclcpp::Time event_received_at_{0, 0, RCL_ROS_TIME};
+
+  px4_msgs::msg::EstimatorStatusFlags estimator_flags_{};
+  rclcpp::Time estimator_flags_received_at_{0, 0, RCL_ROS_TIME};
+
+  px4_msgs::msg::VehicleLandDetected land_detected_{};
+  rclcpp::Time land_detected_received_at_{0, 0, RCL_ROS_TIME};
+
   std::array<float, 3> target_enu_{};
   double target_yaw_{0.0};
   double target_speed_{0.0};
@@ -627,5 +754,9 @@ private:
   rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr command_pub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_position_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleCommandAck>::SharedPtr command_ack_sub_;
+  rclcpp::Subscription<px4_msgs::msg::Event>::SharedPtr event_sub_;
+  rclcpp::Subscription<px4_msgs::msg::EstimatorStatusFlags>::SharedPtr estimator_flags_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_detected_sub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 };

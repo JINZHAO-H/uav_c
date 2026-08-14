@@ -287,6 +287,9 @@ void MissionRunner::run()
 
   const auto initial = bridge_->current_pose_tuple();
 
+  RCLCPP_INFO(get_logger(), "PX4 preflight diagnostics before ARM");
+  bridge_->log_preflight_diagnostics();
+
   RCLCPP_INFO(get_logger(), "Priming setpoints before ARM");
   bridge_->prime_setpoints(initial);
 
@@ -334,6 +337,9 @@ int main(int argc, char ** argv)  //主函数，初始化 ROS2 节点，创建 M
     RCLCPP_INFO(runner->get_logger(), "Mission completed");
   } catch (const std::exception & exc) {
     RCLCPP_ERROR(runner->get_logger(), "Mission failed: %s", exc.what());
+    if (runner->bridge()) {
+      runner->bridge()->log_preflight_diagnostics();
+    }
   }
 
   executor.cancel();
