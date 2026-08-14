@@ -29,7 +29,7 @@ def generate_launch_description():
     start_livox = LaunchConfiguration("start_livox")
     start_point_lio = LaunchConfiguration("start_point_lio")
     start_location_bridge = LaunchConfiguration("start_location_bridge")
-    start_flight_bridge = LaunchConfiguration("start_flight_bridge")  #用于控制是否启动 flight_bridge
+    start_mission = LaunchConfiguration("start_mission")  #用于控制是否启动 mission_runner
 
     dds_device = LaunchConfiguration("dds_device")
     dds_baudrate = LaunchConfiguration("dds_baudrate")
@@ -37,13 +37,15 @@ def generate_launch_description():
     point_lio_config = LaunchConfiguration("point_lio_config")
     point_lio_odom_topic = LaunchConfiguration("point_lio_odom_topic")
     visual_odometry_topic = LaunchConfiguration("visual_odometry_topic")
+    mission_config = LaunchConfiguration("mission_config")
+    route = LaunchConfiguration("route")
 
     declared_args = [  #默认全部是 true
         DeclareLaunchArgument("start_dds_agent", default_value="true"),
         DeclareLaunchArgument("start_livox", default_value="true"),
         DeclareLaunchArgument("start_point_lio", default_value="true"),
         DeclareLaunchArgument("start_location_bridge", default_value="true"),
-        DeclareLaunchArgument("start_flight_bridge", default_value="true"),
+        DeclareLaunchArgument("start_mission", default_value="true"),
         DeclareLaunchArgument(
             "dds_device",
             default_value="/dev/serial/by-path/platform-3610000.usb-usb-0:2.3:1.0-port0",
@@ -56,6 +58,11 @@ def generate_launch_description():
             "visual_odometry_topic",
             default_value="/fmu/in/vehicle_visual_odometry",
         ),
+        DeclareLaunchArgument(
+            "mission_config",
+            default_value="/home/jzh/uav_c/config/mission.yaml",
+        ),
+        DeclareLaunchArgument("route", default_value="custom_points"),
     ]
 
     dds_agent = ExecuteProcess(
@@ -122,24 +129,15 @@ def generate_launch_description():
         ],
     )
 
-    flight_bridge = Node(
+    mission_runner = Node(
         package="uav_control_cpp",
-        executable="flight_bridge",
-        name="flight_bridge",
+        executable="mission_runner",
+        name="mission_runner",
         output="screen",
-        condition=IfCondition(start_flight_bridge),
+        condition=IfCondition(start_mission),
         parameters=[
-            {"setpoint_rate": 40.0},
-            {"prime_seconds": 2.0},
-            {"preserve_current_yaw": True},
-            {"respect_external_takeover": True},
-            {"request_offboard_mode": False},  #不主动请求 OFFBOARD
-            {"enable_offboard_publish": False},  #不主动发布 offboard_control_mode
-            {"enable_setpoint_publish": False},  #不主动发布 trajectory_setpoint
-            {"target_system": 1},
-            {"target_component": 1},
-            {"source_system": 1},
-            {"source_component": 1},
+            {"mission_config": mission_config},
+            {"route": route},
         ],
     )
 
@@ -149,6 +147,6 @@ def generate_launch_description():
             livox_driver,
             point_lio,
             location_bridge,
-            flight_bridge,
+            mission_runner,
         ]
     )

@@ -34,6 +34,7 @@ public:
     route_ = declare_parameter<std::string>("route", "custom_points");
 
     rclcpp::NodeOptions bridge_options;
+    bridge_options.use_global_arguments(false);
     bridge_options.parameter_overrides({
       rclcpp::Parameter("enable_offboard_publish", true),
       rclcpp::Parameter("enable_setpoint_publish", true),
