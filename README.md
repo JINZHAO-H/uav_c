@@ -7,9 +7,9 @@ Point-LIO。
 当前工程仍在开发中，现阶段主要完成：
 
 - 使用 `ros2.repos` 管理第三方 ROS2 依赖；
-- 通过 launch 同时组织 Livox、Point-LIO、PX4 DDS Agent 和自定义桥接节点；
+- 通过 launch 同时组织 Livox、Point-LIO、PX4 DDS Agent、定位桥接和任务节点；
 - 将 Point-LIO 输出的里程计转换为 PX4 可用的 visual odometry；
-- 提供一个保守默认配置的 C++ PX4 OFFBOARD 控制桥接节点。
+- 提供 C++ PX4 OFFBOARD 控制桥接和 mission 任务编排节点。
 
 ## 目标技术栈
 
@@ -34,9 +34,13 @@ Point-LIO。
     │   └── launch
     │       └── slam_location.launch.py
     └── uav_control_cpp
+        ├── include
+        │   └── uav_control_cpp
+        │       └── flight_bridge.hpp
         └── src
             ├── flight_bridge.cpp
-            └── location_bridge.cpp
+            ├── location_bridge.cpp
+            └── mission_runner.cpp
 ```
 
 主要自定义包：
@@ -109,7 +113,10 @@ ros2 launch uav_bringup slam_location.launch.py
 - Livox ROS2 driver
 - Point-LIO
 - `location_bridge`
-- `flight_bridge`
+- `mission_runner`
+
+`mission_runner` 内部会创建并使用 `FlightBridge`，主 launch 不再单独启动
+独立的 `flight_bridge` 节点，避免出现两个飞控控制源。
 
 如果只是做无雷达、无 DDS Agent 的基础启动测试，可以运行：
 
@@ -123,6 +130,9 @@ ros2 launch uav_bringup slam_location.launch.py start_dds_agent:=false start_liv
 - Point-LIO 配置文件：`point_lio/config/mid360.yaml`
 - Point-LIO 里程计话题：`/aft_mapped_to_init`
 - PX4 visual odometry 输入话题：`/fmu/in/vehicle_visual_odometry`
+- mission 配置文件：`/home/jzh/uav_c/config/mission.yaml`
+- 默认路线：`custom_points`
+- 默认启动 mission：`start_mission:=true`
 
 如果实际 DDS 串口设备不同，可以在启动时覆盖：
 
@@ -159,12 +169,18 @@ visual odometry。
 
 ### `flight_bridge`
 
-`flight_bridge` 封装 PX4 OFFBOARD 飞行控制相关的 DDS 话题读写。
+`FlightBridge` 封装 PX4 OFFBOARD 飞行控制相关的 DDS 话题读写。它主要被
+`mission_runner` 在进程内部创建并调用；如果只想单独测试底层飞控桥，也可
+以手动运行 `ros2 run uav_control_cpp flight_bridge`。
 
 订阅：
 
 - `/fmu/out/vehicle_status`
 - `/fmu/out/vehicle_local_position`
+- `/fmu/out/vehicle_command_ack`
+- `/fmu/out/event`
+- `/fmu/out/estimator_status_flags`
+- `/fmu/out/vehicle_land_detected`
 
 发布：
 
@@ -172,14 +188,31 @@ visual odometry。
 - `/fmu/in/trajectory_setpoint`
 - `/fmu/in/vehicle_command`
 
-这个节点提供连接等待、本地位置有效性检查、setpoint 预热、解锁、请求
-OFFBOARD、飞向目标点、悬停、降落和关闭等 C++ 控制逻辑。它更像是一个
-底层飞控桥接工具，后续应由更高层的 mission / state machine 节点来编排
-完整任务流程。
+这个类提供连接等待、本地位置有效性检查、setpoint 预热、解锁、请求
+OFFBOARD、飞向目标点、悬停、降落、关闭和起飞前诊断等 C++ 控制逻辑。
 
-## 安全默认值
+### `mission_runner`
 
-launch 文件中，主动飞控输出默认是关闭的：
+`mission_runner` 是 C++ mission / state machine 节点，负责读取
+`config/mission.yaml` 并按配置执行任务。
+
+当前主流程：
+
+- 等待 PX4 DDS 连接；
+- 等待 PX4 local position 正常；
+- 打印 PX4 起飞前诊断；
+- prime setpoints；
+- 按旧实飞逻辑自动 ARM；
+- 不主动切 OFFBOARD，等待飞手手动切 OFFBOARD；
+- 按 YAML 航点执行 `custom_points`；
+- 完成后请求 PX4 LAND。
+
+起飞前诊断会读取 PX4 ACK、event、estimator flags 和 land detected 状态，
+用于判断 ARM / OFFBOARD / EKF 健康问题。
+
+## 安全说明
+
+`FlightBridge` 单独运行时，主动飞控输出默认是关闭的：
 
 ```text
 request_offboard_mode := false
@@ -187,12 +220,24 @@ enable_offboard_publish := false
 enable_setpoint_publish := false
 ```
 
-这样设计是为了保证启动 launch 文件时，不会自动请求 OFFBOARD，也不会默认
-向 PX4 发布 trajectory setpoint。
+主 launch 当前默认启动 `mission_runner`：
+
+```text
+start_mission := true
+```
+
+这意味着接入真实硬件且 PX4 DDS、定位和 local position 都正常后，mission
+会进入自动 ARM 流程。它不会主动切 OFFBOARD，因为：
+
+```text
+request_offboard_mode := false
+```
+
+飞手仍需手动切入 OFFBOARD，任务才会继续执行航点。
 
 真正试飞前，应先完成 SITL 或无桨安全测试，确认 DDS 链路、PX4 状态反馈、
 Point-LIO 里程计、visual odometry 注入和 PX4 local position 都正常后，
-再谨慎打开飞控输出相关参数。
+再运行完整 mission。
 
 ## 当前开发状态
 
@@ -202,11 +247,11 @@ Point-LIO 里程计、visual odometry 注入和 PX4 local position 都正常后�
 - `ros2.repos` 第三方依赖管理；
 - Livox MID360 + Point-LIO launch 集成；
 - Point-LIO odometry 到 PX4 visual odometry 的桥接；
-- C++ PX4 OFFBOARD 控制桥接工具函数。
+- C++ PX4 OFFBOARD 控制桥接工具函数；
+- C++ mission runner 主流程；
+- PX4 起飞前诊断日志。
 
 计划继续完善：
 
-- 更高层的 mission / state machine 节点；
 - 面向 SITL 的验证流程；
 - 面向真实设备的试飞前检查清单。
-
